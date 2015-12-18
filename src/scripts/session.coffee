@@ -14,18 +14,12 @@ Async = require('async')
 _ = require('underscore')
 Events = require('events')
 Util = require('util')
-Stream = require('stream')
-Watson = require('watson-developer-cloud')
-LanguageTranslation = Watson.language_translation(
-  username: process.env.WATSON_USERNAME
-  password: process.env.WATSON_PASSWORD
-  version: 'v2'
-  )
-
+LanguageFilter = require('watson-translate-stream')
 connectionString = process.env.MONGO_URL or 'localhost/greenbot'
 Db = require('monk')(connectionString)
 Rooms = Db.get('Rooms')
 Sessions = Db.get('Sessions')
+Pipe = require("multipipe")
 
 module.exports = (robot) ->
   # Helper functions
@@ -75,76 +69,6 @@ module.exports = (robot) ->
       else
         Sessions.insert information, cb
 
-  class LanguageDetector extends Stream.PassThrough
-    constructor: (@lang) ->
-      @adaptive = !!@lang
-      super
-      console.log "Detector contstructed with #{@lang}"
-
-    analyze: (words) ->
-      if @adaptive
-        # @lang = Watson.detect(words)
-        @lang = @lang
-
-    getLang: () =>
-      console.log "Language detector thinks #{@lang}"
-      @lang
-
-    _write: (chunk, enc, cb) ->
-      @analyze(chunk.toString())
-      super arguments...
-
-    _read: (n) ->
-      super arguments...
-
-  class LanguageStream extends Stream.PassThrough
-    constructor: (@fromLanguage, @toLanguage) ->
-      super
-
-    translate: (from, to, words) ->
-      translation
-
-    _write : (chunk, enc, cb) ->
-      unless process.env.WATSON_USERNAME?
-        super chunk, enc, cb
-        return
-      else
-        words = chunk.toString()
-        if isJson words or process.env.NO_TRANSLATE
-          super new Buffer(words), enc, cb
-          return
-
-        from = @fromLanguage()
-        to = @toLanguage()
-        options =
-          text: words
-          source: from
-          target: to
-        LanguageTranslation.translate options, (err, result) =>
-          if (err)
-            console.log(err)
-          else
-            trans = result.translations[0].translation
-            console.log "Original : #{words}"
-            console.log "Trans: #{Util.inspect trans}"
-            super new Buffer(trans), enc, cb
-
-    _read: (n) ->
-      super arguments...
-
-  class LanguageFilter
-    constructor: (@nearEndLanguage, @farEndLanguage) ->
-      console.log @nearEndLanguage
-      console.log @farEndLanguage
-      nearEndDetector = new LanguageDetector(@nearEndLanguage)
-      farEndDetector = new LanguageDetector(@farEndLanguage)
-      ingressLangStream = new LanguageStream farEndDetector.getLang,
-                          nearEndDetector.getLang
-      @ingressStream = farEndDetector.pipe(ingressLangStream)
-      egressLangStream = new LanguageStream nearEndDetector.getLang,
-                          farEndDetector.getLang
-      @egressStream = nearEndDetector.pipe(egressLangStream)
-
 
   class Session
     @active = []
@@ -190,15 +114,16 @@ module.exports = (robot) ->
 
       # Start the process, connect the pipes
       @process = ChildProcess.spawn(@command, @arguments, @opts)
-      @ingressProcessStream = new Stream.PassThrough()
-      @egressProcessStream = new Stream.PassThrough()
+      @language = new LanguageFilter('en')
+      @ingressProcessStream = Pipe(@language.ingressStream, @process.stdin)
+      @egressProcessStream = Pipe(@process.stdout, @language.egressStream)
 
-      @language = new LanguageFilter('en', 'es')
-      @ingressProcessStream.pipe(@language.ingressStream).pipe(@process.stdin)
-
-      @process.stdout.pipe(@language.egressStream).pipe(@egressProcessStream)
-      @egressProcessStream.on "data", (buffer) => @egressMsg(buffer)
-      @egressProcessStream.on "end", (code, signal) => @endSession()
+      @egressProcessStream.on "readable", () =>
+        # Send the output of the egress stream off to the network
+        @egressMsg @egressProcessStream.read()
+      @egressProcessStream.on "end", (code, signal) =>
+        # When the egress stream closes, the session ends.
+        @endSession()
       @egressProcessStream.on "error", (err) ->
         info "Error thrown from session"
         info err
@@ -268,7 +193,10 @@ module.exports = (robot) ->
 
 
     egressMsg: (text) =>
-      lines = text.toString().split("\n")
+      if text
+        lines = text.toString().split("\n")
+      else
+        lines = []
       for line in lines
         line = line.trim()
         if isJson line
@@ -304,11 +232,9 @@ module.exports = (robot) ->
       robot.emit "slack:egress", dst, txt
 
   robot.hear /(.*)/i, (hubotMsg) ->
-    dst = hubotMsg.message.room.toLowerCase()
-    src = hubotMsg.message.user.name.toLowerCase()
     msg =
-      dst: dst
-      src: src
+      dst: hubotMsg.message.room.toLowerCase()
+      src: hubotMsg.message.user.name.toLowerCase()
       txt: hubotMsg.message.text
     Session.findOrCreate msg, (src, txt) ->
       user = robot.brain.userForId dst, name: src
