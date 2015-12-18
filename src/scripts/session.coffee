@@ -304,9 +304,11 @@ module.exports = (robot) ->
       robot.emit "slack:egress", dst, txt
 
   robot.hear /(.*)/i, (hubotMsg) ->
+    dst = hubotMsg.message.room.toLowerCase()
+    src = hubotMsg.message.user.name.toLowerCase()
     msg =
-      dst: hubotMsg.message.room.toLowerCase()
-      src: hubotMsg.message.user.name.toLowerCase()
+      dst: dst
+      src: src
       txt: hubotMsg.message.text
     Session.findOrCreate msg, (src, txt) ->
       user = robot.brain.userForId dst, name: src
