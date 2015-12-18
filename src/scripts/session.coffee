@@ -20,6 +20,7 @@ Db = require('monk')(connectionString)
 Rooms = Db.get('Rooms')
 Sessions = Db.get('Sessions')
 Pipe = require("multipipe")
+Stream = require('stream')
 
 module.exports = (robot) ->
   # Helper functions
@@ -69,7 +70,6 @@ module.exports = (robot) ->
       else
         Sessions.insert information, cb
 
-
   class Session
     @active = []
 
@@ -112,11 +112,29 @@ module.exports = (robot) ->
       @automated = true
       @createSessionEnv()
 
+      # Filter out JSON as it goes through the system
+      jsonFilter = new Stream.Transform()
+      jsonFilter._transform = (chunk, encoding, done) ->
+        lines = chunk.toString().split("\n")
+        for line in lines
+          do (line) ->
+            if isJson(line)
+              jsonFilter.emit 'json', line
+            else
+              jsonFilter.push(line)
+        done()
+      jsonFilter.on 'json', (line) =>
+        # If the message is JSON, treat it as if it were collected data
+        info "Remembering #{line}"
+        @collectedData = JSON.parse line
+        @updateDb()
+
       # Start the process, connect the pipes
       @process = ChildProcess.spawn(@command, @arguments, @opts)
       @language = new LanguageFilter('en')
       @ingressProcessStream = Pipe(@language.ingressStream, @process.stdin)
-      @egressProcessStream = Pipe(@process.stdout, @language.egressStream)
+      @egressProcessStream = Pipe(@process.stdout, jsonFilter,
+                                  @language.egressStream)
 
       @egressProcessStream.on "readable", () =>
         # Send the output of the egress stream off to the network
@@ -199,17 +217,11 @@ module.exports = (robot) ->
         lines = []
       for line in lines
         line = line.trim()
-        if isJson line
-          # If the message is JSON, treat it as if it were collected data
-          @collectedData = JSON.parse line
+        if line.length > 0
+          @cb @src, line
+          info "#{@sessionId}: #{@room.name}: #{line}"
+          @transcript.push { direction: 'egress', text: line}
           @updateDb()
-        else
-          # It's not JSON, gotta be a message.
-          if line.length > 0
-            @cb @src, line
-            info "#{@sessionId}: #{@room.name}: #{line}"
-            @transcript.push { direction: 'egress', text: line}
-            @updateDb()
 
     ingressMsg: (text) =>
       if cleanText(text) == '/human'
@@ -232,9 +244,11 @@ module.exports = (robot) ->
       robot.emit "slack:egress", dst, txt
 
   robot.hear /(.*)/i, (hubotMsg) ->
+    dst = hubotMsg.message.room.toLowerCase()
+    src = hubotMsg.message.user.name.toLowerCase()
     msg =
-      dst: hubotMsg.message.room.toLowerCase()
-      src: hubotMsg.message.user.name.toLowerCase()
+      dst: dst
+      src: src
       txt: hubotMsg.message.text
     Session.findOrCreate msg, (src, txt) ->
       user = robot.brain.userForId dst, name: src

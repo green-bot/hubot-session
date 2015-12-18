@@ -14,7 +14,7 @@ module.exports = (robot) ->
     slack.login()
 
     slack.on 'open', ->
-      console.log "Running slackbot as @#{slack.self.name} of #{slack.team.name}"
+      console.log "Running slackbot: @#{slack.self.name} of #{slack.team.name}"
 
     slack.on 'message', (message) ->
       {type, ts, text, user, channel} = message
