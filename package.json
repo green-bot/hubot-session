@@ -1,0 +1,26 @@
+{
+  "name": "hubot-session",
+  "version": "0.1.0",
+  "description": "The session core of Greenbot, packaged to be stuck into hubot",
+  "main": "./src/index.coffee",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/green-bot/hubot-session.git"
+  },
+  "keywords": [
+    "hubot",
+    "greenbot",
+    "session",
+    "green-bot",
+    "chatbot",
+    "chat"
+  ],
+  "author": "Thomas Howe <ghostofbasho@gmail.com> (http://www.thomashowe.me)",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/green-bot/hubot-session/issues"
+  }
+}
