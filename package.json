@@ -22,5 +22,17 @@
   "license": "MIT",
   "bugs": {
     "url": "https://github.com/green-bot/hubot-session/issues"
+  },
+  "dependencies": {
+    "monk": "1.0.1",
+    "node-promise": "0.5.12",
+    "nodemailer": "1.10.0",
+    "request-promise": "1.0.2",
+    "shortid": "2.2.4",
+    "slack-client": "1.5.1",
+    "telnet": "0.0.1",
+    "underscore": "1.8.3",
+    "underscore.string": "3.2.2",
+    "watson-translate-stream": "0.2.0"
   }
 }

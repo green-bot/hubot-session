@@ -1,8 +1,16 @@
-# Description
+# Description:
+#   Handles notifcations after a session is complete.
 #
-# Notify on session completion.
-# Author: howethomas
+# Dependencies:
 #
+# Configuration:
+#
+# Commands:
+#
+# Author:
+#   Thomas Howe - ghostofbasho@gmail.com
+#
+
 
 Request = require("request")
 Mailer = require("nodemailer")

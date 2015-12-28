@@ -1,3 +1,16 @@
+# Description:
+#   Connects greenbot to live chat.
+#
+# Dependencies:
+#
+# Configuration:
+#
+# Commands:
+#
+# Author:
+#   Thomas Howe - ghostofbasho@gmail.com
+#
+
 Request = require('request-promise')
 Slack = require('slack-client')
 Util = require('util')

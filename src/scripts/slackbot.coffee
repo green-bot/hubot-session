@@ -1,3 +1,17 @@
+# Description:
+#   Handles slack bot interface.
+#
+# Dependencies:
+#
+# Configuration:
+#
+# Commands:
+#
+# Author:
+#   Thomas Howe - ghostofbasho@gmail.com
+#
+
+
 Request = require('request-promise')
 Slack = require('slack-client')
 Util = require('util')

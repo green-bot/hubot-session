@@ -1,31 +1,41 @@
-# Description
+# Description:
+#   Handles session aware dialogs.
 #
-# Session connects users with shell scripts.
-# Author: howethomas
+# Dependencies:
+#
+# Configuration:
+#
+# Commands:
+#
+# Author:
+#   Thomas Howe - ghostofbasho@gmail.com
 #
 
-ShortUUID = require 'shortid'
-Os = require("os")
-ChildProcess = require("child_process")
-Url = require("url")
-Mailer = require("nodemailer")
-Us = require("underscore.string")
-Async = require('async')
 _ = require('underscore')
+Async = require('async')
+ChildProcess = require("child_process")
 Events = require('events')
-Util = require('util')
 LanguageFilter = require('watson-translate-stream')
+Mailer = require("nodemailer")
+Os = require("os")
+Pipe = require("multipipe")
+Promise = require('node-promise')
+ShortUUID = require 'shortid'
+Stream = require('stream')
+Url = require("url")
+Us = require("underscore.string")
+Util = require('util')
+
+# Setup the connection to the database
 connectionString = process.env.MONGO_URL or 'localhost/greenbot'
 Db = require('monk')(connectionString)
 Rooms = Db.get('Rooms')
 Sessions = Db.get('Sessions')
-Pipe = require("multipipe")
-Stream = require('stream')
 
 module.exports = (robot) ->
   # Helper functions
   info = (text) ->
-    robot.emit 'log', text
+    console.log text
 
   genSessionKey = (msg) ->
     msg.src + "_" + msg.dst
@@ -68,6 +78,8 @@ module.exports = (robot) ->
             new: true
           }, cb
       else
+        info 'Creating a new session'
+        information.createdAt = Date.now()
         Sessions.insert information, cb
 
   class Session
@@ -101,6 +113,7 @@ module.exports = (robot) ->
             else
               info 'No default room, no matching keyword. Fail.'
 
+
     constructor: (@msg, @room, @cb) ->
       # The variables that make up a Session
       @transcript = []
@@ -110,43 +123,71 @@ module.exports = (robot) ->
       @sessionId = ShortUUID.generate()
       Session.active[@sessionKey] = @
       @automated = true
+      @processStack = []
+
+      # Assemble the @command, @arguments, @opts
       @createSessionEnv()
+      langQ = Sessions.findOne({src: @src}, {sort: {updatedAt: -1}})
+      langQ.error = (err) ->
+        info 'Mongo error in fetch language : ' + err
+      langQ.then (session) =>
+        info 'Session query complete : ' + Util.inspect session
+        if session?.lang?
+          @lang = session.lang
+        else
+          @lang = process.env.DEFAULT_LANG or 'en'
+        info 'Kicking off process with lang ' + @lang
+        @kickOffProcess(@command, @arguments, @opts, @lang)
 
-      # Filter out JSON as it goes through the system
-      jsonFilter = new Stream.Transform()
-      jsonFilter._transform = (chunk, encoding, done) ->
-        lines = chunk.toString().split("\n")
-        for line in lines
-          do (line) ->
-            if isJson(line)
-              jsonFilter.emit 'json', line
-            else
-              jsonFilter.push(line)
-        done()
-      jsonFilter.on 'json', (line) =>
-        # If the message is JSON, treat it as if it were collected data
-        info "Remembering #{line}"
-        @collectedData = JSON.parse line
-        @updateDb()
-
+    kickOffProcess : (command, args, opts, lang) ->
       # Start the process, connect the pipes
-      @process = ChildProcess.spawn(@command, @arguments, @opts)
-      @language = new LanguageFilter('en')
+      info 'Kicking off process ' + command
+      @process = ChildProcess.spawn(command, args, opts)
+      info "New process : #{@process.pid}"
+      @language = new LanguageFilter('en', lang)
+      jsonFilter = @createJsonFilter()
       @ingressProcessStream = Pipe(@language.ingressStream, @process.stdin)
       @egressProcessStream = Pipe(@process.stdout, jsonFilter,
                                   @language.egressStream)
 
       @egressProcessStream.on "readable", () =>
         # Send the output of the egress stream off to the network
+        info 'Data available for reading'
         @egressMsg @egressProcessStream.read()
+
       @egressProcessStream.on "end", (code, signal) =>
         # When the egress stream closes, the session ends.
-        @endSession()
+        # If process stack empty, end
+        nextProcess = @processStack.shift()
+          # If process stack has element, run that.
+        if nextProcess?
+          info 'Process ended. Starting a new one.'
+
+          # Unpipe the old stuff
+          @process.stdout.unpipe()
+          {command, args, opts, lang} = nextProcess
+          @kickOffProcess(command, args, opts, lang)
+        else
+          info 'Process ended.'
+          @endSession()
+
       @egressProcessStream.on "error", (err) ->
         info "Error thrown from session"
         info err
       @process.stderr.on "data", (buffer) ->
         info "Received from stderr #{buffer}"
+      @language.on "langChanged", (oldLang, newLang) =>
+        info "Language changed, restarting : #{oldLang} to #{newLang}"
+        @egressProcessStream.write("Language changed, restarting conversation.")
+        info "Restarting session."
+        @lang = newLang
+        nextProcess =
+          command: @command
+          args: @arguments
+          opts: @opts
+          lang: @lang
+        @processStack.push nextProcess
+        @process.kill()
 
     createSessionEnv: () ->
       if @isOwner()
@@ -185,6 +226,9 @@ module.exports = (robot) ->
       sessionId:      @sessionId
       roomId:         @room.objectId
       collectedData:  @collectedData
+      updatedAt:      Date.now()
+      lang:           @lang
+
 
     endSession: () ->
       info "Ending and recording session #{@sessionId}"
@@ -234,6 +278,27 @@ module.exports = (robot) ->
       @transcript.push { direction: 'ingress', text: text}
       info "#{@sessionId}: #{@src}: #{text}"
       @updateDb()
+
+    createJsonFilter: () =>
+      # Filter out JSON as it goes through the system
+      jsonFilter = new Stream.Transform()
+      jsonFilter._transform = (chunk, encoding, done) ->
+        info "Filtering JSON"
+        lines = chunk.toString().split("\n")
+        for line in lines
+          do (line) ->
+            if isJson(line)
+              jsonFilter.emit 'json', line
+            else
+              jsonFilter.push(line)
+        done()
+      jsonFilter.on 'json', (line) =>
+        # If the message is JSON, treat it as if it were collected data
+        info "Remembering #{line}"
+        @collectedData = JSON.parse line
+        @updateDb()
+      return jsonFilter
+
 
   robot.on 'telnet:ingress', (msg) ->
     Session.findOrCreate msg, (dst, txt) ->
