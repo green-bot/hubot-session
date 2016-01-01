@@ -96,10 +96,11 @@ module.exports = (robot) ->
         # No session active. Kick one off.
         name = process.env.DEV_ROOM_NAME or msg.dst.toLowerCase()
         keyword = cleanText(msg.txt)
+        info "Looking for #{name}:#{keyword}"
         Rooms.findOne {name: name, keyword: keyword}, (err, room) ->
           info "Can't find #{name}:#{keyword}" if err
           if room
-            info "Found room #{name}, starting session"
+            info "Found room #{name}:#{room.keyword}:#{room.default_cmd}"
             new Session(msg, room, cb)
           return if room or err
 
@@ -131,7 +132,6 @@ module.exports = (robot) ->
       langQ.error = (err) ->
         info 'Mongo error in fetch language : ' + err
       langQ.then (session) =>
-        info 'Session query complete : ' + Util.inspect session
         if session?.lang?
           @lang = session.lang
         else
@@ -143,7 +143,6 @@ module.exports = (robot) ->
       # Start the process, connect the pipes
       info 'Kicking off process ' + command
       @process = ChildProcess.spawn(command, args, opts)
-      info "New process : #{@process.pid}"
       @language = new LanguageFilter('en', lang)
       jsonFilter = @createJsonFilter()
       @ingressProcessStream = Pipe(@language.ingressStream, @process.stdin)
@@ -176,6 +175,8 @@ module.exports = (robot) ->
         info err
       @process.stderr.on "data", (buffer) ->
         info "Received from stderr #{buffer}"
+      @process.on "error", (err) ->
+        info "Failed to start process: " + err
       @language.on "langChanged", (oldLang, newLang) =>
         info "Language changed, restarting : #{oldLang} to #{newLang}"
         @egressProcessStream.write("Language changed, restarting conversation.")
@@ -188,6 +189,8 @@ module.exports = (robot) ->
           lang: @lang
         @processStack.push nextProcess
         @process.kill()
+
+      info "New process started : #{@process.pid}"
 
     createSessionEnv: () ->
       if @isOwner()
@@ -301,8 +304,10 @@ module.exports = (robot) ->
 
 
   robot.on 'telnet:ingress', (msg) ->
+    info 'Ingress message for telnet ' + JSON.stringify msg
     Session.findOrCreate msg, (dst, txt) ->
-      robot.emit "telnet:egress:#{dst}", txt
+      info 'Egress message for telnet ' + txt
+      robot.emit "telnet:egress:telnet", txt
 
   robot.on 'slack:ingress', (msg) ->
     Session.findOrCreate msg, (dst, txt) ->
