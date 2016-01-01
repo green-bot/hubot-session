@@ -143,7 +143,10 @@ module.exports = (robot) ->
       # Start the process, connect the pipes
       info 'Kicking off process ' + command
       @process = ChildProcess.spawn(command, args, opts)
+      info 'Child process spawned'
       @language = new LanguageFilter('en', lang)
+      info 'Language filtered'
+
       jsonFilter = @createJsonFilter()
       @ingressProcessStream = Pipe(@language.ingressStream, @process.stdin)
       @egressProcessStream = Pipe(@process.stdout, jsonFilter,
