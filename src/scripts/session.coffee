@@ -13,6 +13,7 @@
 
 _ = require('underscore')
 Async = require('async')
+Bluebird = require('bluebird')
 ChildProcess = require("child_process")
 Events = require('events')
 LanguageFilter = require('watson-translate-stream')
@@ -20,6 +21,7 @@ Mailer = require("nodemailer")
 Os = require("os")
 Pipe = require("multipipe")
 Promise = require('node-promise')
+Redis = require('redis')
 ShortUUID = require 'shortid'
 Stream = require('stream')
 Url = require("url")
@@ -31,6 +33,22 @@ connectionString = process.env.MONGO_URL or 'localhost/greenbot'
 Db = require('monk')(connectionString)
 Rooms = Db.get('Rooms')
 Sessions = Db.get('Sessions')
+
+# Setup the connect to Redis
+Bluebird.promisifyAll(Redis.RedisClient.prototype)
+Bluebird.promisifyAll(Redis.Multi.prototype)
+client = Redis.createClient()
+egressClient = Redis.createClient()
+sessionClient = Redis.createClient()
+
+INGRESS_MSGS_FEED = 'INGRESS_MSGS'
+EGRESS_MSGS_FEED = 'EGRESS_MSGS'
+SESSION_NAME = process.env.SESSION_NAME || 'BASH'
+NEW_SESSIONS_FEED = SESSION_NAME + '.NEW_SESSIONS'
+SESSION_ENDED_FEED = 'COMPLETED_SESSIONS'
+
+# Set the default directory for scripts
+DEF_SCRIPT_DIR = process.env.DEF_SCRIPT_DIR || '.'
 
 module.exports = (robot) ->
   # Helper functions
@@ -59,6 +77,12 @@ module.exports = (robot) ->
     catch e
       return false
     true
+
+  ingressList = (sessionKey) ->
+    sessionKey + '.ingress'
+
+  egressList = (sessionKey) ->
+    sessionKey + '.egress'
 
   sessionUpdate = Async.queue (session, callback) ->
     information = session.information()
@@ -114,6 +138,12 @@ module.exports = (robot) ->
             else
               info 'No default room, no matching keyword. Fail.'
 
+    @complete: (sessionId) ->
+      # All messages that come from the network end up here.
+      info "Notification of script complete for session #{sessionId}"
+      for s of @active
+        if @active[s].sessionId is sessionId
+          @active[s].endSession()
 
     constructor: (@msg, @room, @cb) ->
       # The variables that make up a Session
@@ -142,44 +172,55 @@ module.exports = (robot) ->
     kickOffProcess : (command, args, opts, lang) ->
       # Start the process, connect the pipes
       info 'Kicking off process ' + command
-      @process = ChildProcess.spawn(command, args, opts)
-      info 'Child process spawned'
-      @language = new LanguageFilter('en', lang)
-      info 'Language filtered'
+      sess =
+        command: command
+        args: args
+        opts: opts
+        sessionId: @sessionId
 
+      newSessionRequest = JSON.stringify sess
+      client.lpush NEW_SESSIONS_FEED, newSessionRequest
+      client.publish NEW_SESSIONS_FEED, newSessionRequest
+      @language = new LanguageFilter('en', lang)
       jsonFilter = @createJsonFilter()
-      @ingressProcessStream = Pipe(@language.ingressStream, @process.stdin)
-      @egressProcessStream = Pipe(@process.stdout, jsonFilter,
+      @egressProcessStream = Pipe(jsonFilter,
                                   @language.egressStream)
+
+      egressClient.on 'message', (chan, sessionKey) =>
+        popped = (txt) =>
+          info('Popped a ' + txt)
+          if txt
+            lines = txt.toString().split("\n")
+          else
+            lines = []
+          for line in lines
+            @egressProcessStream.write(line) if (line)
+        errored = (err) ->
+          info('Popping message returns ' + err)
+        redisList = egressList(sessionKey)
+        client.lpopAsync(redisList).then(popped, errored)
+      egressClient.subscribe(EGRESS_MSGS_FEED)
+
+      sessionClient.on 'message', (chan, sessionKey) ->
+        Session.complete(sessionKey)
+      sessionClient.subscribe(SESSION_ENDED_FEED)
+
+
+      # Start the subscriber for the bash_process pub/sub
+      @ingressProcessStream = @language.ingressStream
+      @ingressProcessStream.on 'readable', () =>
+        redisList = ingressList(@sessionId)
+        client.lpush redisList, @ingressProcessStream.read()
+        client.publish INGRESS_MSGS_FEED, @sessionId
 
       @egressProcessStream.on "readable", () =>
         # Send the output of the egress stream off to the network
         info 'Data available for reading'
         @egressMsg @egressProcessStream.read()
 
-      @egressProcessStream.on "end", (code, signal) =>
-        # When the egress stream closes, the session ends.
-        # If process stack empty, end
-        nextProcess = @processStack.shift()
-          # If process stack has element, run that.
-        if nextProcess?
-          info 'Process ended. Starting a new one.'
-
-          # Unpipe the old stuff
-          @process.stdout.unpipe()
-          {command, args, opts, lang} = nextProcess
-          @kickOffProcess(command, args, opts, lang)
-        else
-          info 'Process ended.'
-          @endSession()
-
       @egressProcessStream.on "error", (err) ->
         info "Error thrown from session"
         info err
-      @process.stderr.on "data", (buffer) ->
-        info "Received from stderr #{buffer}"
-      @process.on "error", (err) ->
-        info "Failed to start process: " + err
       @language.on "langChanged", (oldLang, newLang) =>
         info "Language changed, restarting : #{oldLang} to #{newLang}"
         @egressProcessStream.write("Language changed, restarting conversation.")
@@ -191,7 +232,7 @@ module.exports = (robot) ->
           opts: @opts
           lang: @lang
         @processStack.push nextProcess
-        @process.kill()
+        # @process.kill()
 
       info "New process started : #{@process.pid}"
 
@@ -215,7 +256,7 @@ module.exports = (robot) ->
       @env = @cmdSettings()
       @env.INITIAL_MSG = @msg.txt
       @opts =
-        cwd: @room.default_path
+        cwd: DEF_SCRIPT_DIR
         env: @env
 
 
@@ -237,9 +278,16 @@ module.exports = (robot) ->
 
 
     endSession: () ->
-      info "Ending and recording session #{@sessionId}"
-      robot.emit 'session:ended', @sessionId
-      delete Session.active[@sessionKey]
+      nextProcess = @processStack.shift()
+        # If process stack has element, run that.
+      if nextProcess?
+        info 'Process ended. Starting a new one.'
+        {command, args, opts, lang} = nextProcess
+        @kickOffProcess(command, args, opts, lang)
+      else
+        info "Ending and recording session #{@sessionId}"
+        robot.emit 'session:ended', @sessionId
+        delete Session.active[@sessionKey]
 
     cmdSettings: () ->
       env_settings = _.clone(process.env)
@@ -285,7 +333,7 @@ module.exports = (robot) ->
       info "#{@sessionId}: #{@src}: #{text}"
       @updateDb()
 
-    createJsonFilter: () =>
+    createJsonFilter: () ->
       # Filter out JSON as it goes through the system
       jsonFilter = new Stream.Transform()
       jsonFilter._transform = (chunk, encoding, done) ->
@@ -298,8 +346,9 @@ module.exports = (robot) ->
             else
               jsonFilter.push(line)
         done()
-      jsonFilter.on 'json', (line) =>
+
         # If the message is JSON, treat it as if it were collected data
+      jsonFilter.on 'json', (line) =>
         info "Remembering #{line}"
         @collectedData = JSON.parse line
         @updateDb()

@@ -24,9 +24,11 @@
     "url": "https://github.com/green-bot/hubot-session/issues"
   },
   "dependencies": {
+    "bluebird": "3.1.1",
     "monk": "1.0.1",
     "node-promise": "0.5.12",
     "nodemailer": "1.10.0",
+    "redis": "2.4.2",
     "request-promise": "1.0.2",
     "shortid": "2.2.4",
     "slack-client": "1.5.1",
